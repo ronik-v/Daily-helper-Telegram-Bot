@@ -9,13 +9,15 @@ from aiogram import Bot, types
 from config import bot_token
 
 from MessageText import START_COMMAND, HELP_COMMAND
-from Finance import GetInfoAboutRate
-from DailyNews import DailyNews
 from Weather import GetWeather
+
+import logging
+from create_connection import connection
 
 from transliterate import translit
 bot = Bot(token=bot_token)
 dp = Dispatcher(bot, storage=MemoryStorage())
+logger = logging.getLogger(__name__)
 keyboard = ReplyKeyboardMarkup(resize_keyboard=True)
 buttons = ['Помощь', 'Новости', 'Курсы валют', 'Погода']
 keyboard.add(*buttons)
@@ -23,6 +25,10 @@ keyboard.add(*buttons)
 
 class WeatherForm(StatesGroup):
     city = State()
+
+
+class RateForm(StatesGroup):
+    rate_symbol = State()
 
 
 @dp.message_handler(commands=['start'])
@@ -46,15 +52,24 @@ async def process_help_command(message: types.Message):
 
 @dp.message_handler(lambda message: message.text == 'Новости')
 async def news_command(message: types.Message):
-    NEWS = DailyNews().__call__()
-    for key, value in zip(NEWS.keys(), NEWS.values()):
-        await bot.send_message(message.from_id, f"{key} --- {value}")
+    conn = connection()
+    cur = conn.cursor()
+    try:
+        cur.execute('SELECT title, text, url FROM FinNews')
+        for news in cur.fetchall():
+            news_obj = f'\t{news[0]}\n{news[1]}\nИсточник: {news[2]}'
+            await bot.send_message(message.from_id, news_obj)
+    except:
+        logging.basicConfig(format='%(asctime)s - %(message)s', level=logging.INFO)
+        logging.error(f'news_command {message.from_user.id}-{message.from_user.first_name}')
+    finally:
+        conn.close()
 
 
 @dp.message_handler(lambda message: message.text == 'Курсы валют')
-async def rate_command(message: types.Message):
-    for obj in GetInfoAboutRate().__call__():
-        await bot.send_message(message.from_id, obj)
+async def rate_handler(message: types.Message):
+    await RateForm.rate_symbol.set()
+    await message.answer('Введите символ валюты')
 
 
 @dp.message_handler(lambda message: message.text == 'Погода')
@@ -76,13 +91,34 @@ async def cancel_handler(message: types.Message, state: FSMContext):
 @dp.message_handler(state=WeatherForm.city)
 async def weather_command(message: types.Message, state: FSMContext):
     en_city = translit(message.text, reversed=True)
-    for obj in GetWeather(en_city).__call__():
-        await bot.send_message(message.from_id, obj)
-    await state.finish()
+    try:
+        for obj in GetWeather(en_city).__call__():
+            await bot.send_message(message.from_id, obj)
+    except:
+        logging.basicConfig(format='%(asctime)s - %(message)s', level=logging.INFO)
+        logging.error(f'weather_command {message.from_user.id}-{message.from_user.first_name} -> {en_city}')
+    finally:
+        await state.finish()
+
+
+@dp.message_handler(state=RateForm.rate_symbol)
+async def rate_command(message: types.Message, state: FSMContext):
+    symbol = message.text.replace(' ', '').upper()
+    conn = connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(f"SELECT rate_text, sum_rub FROM Rates WHERE rate_symbol = '{symbol}'")
+        for rate in cur.fetchall():
+            await bot.send_message(message.from_id, f'{rate[0]} в рублях = {rate[1]}')
+            break
+    except:
+        logging.basicConfig(format='%(asctime)s - %(message)s', level=logging.INFO)
+        logging.error(f'rate_command {message.from_user.id}-{message.from_user.first_name} -> {symbol}')
+        await message.answer('Простите но вы ввели несуществующий символ')
+    finally:
+        conn.close()
+        await state.finish()
 
 
 if __name__ == '__main__':
-    try:
-        executor.start_polling(dp)
-    except OSError:
-        exit(1)
+    executor.start_polling(dp, skip_updates=True)
